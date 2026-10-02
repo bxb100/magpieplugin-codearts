@@ -567,7 +567,7 @@ async function balance(ak, sk, signal) {
 // subscription's own name when it tells one.
 function usageOf(b) {
   const num = (x) => (typeof x === "number" && Number.isFinite(x) ? x : 0)
-  const pct = (used, total) => (total > 0 ? Math.max(0, Math.min(100, used)) : 0)
+  const pct = (v) => Math.max(0, Math.min(100, v))
   const windows = []
 
   const free = b?.free ?? b // the old shape, a bare balance answer

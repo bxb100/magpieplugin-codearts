@@ -15,6 +15,8 @@ are asked for by the plugin's sign-in.
 > The keys hold the account's whole Huawei Cloud, not CodeArts alone.
 > Treat them as you would any cloud root credential.
 
+The sign-in asks for the AK first — it is the one key OpenCode's `api`
+entry takes — and then for the SK, which becomes that entry's metadata.
 The keys are kept where OpenCode keeps sign-ins (`auth.json`; in
 magpie, `plugin-auth.json`) as an `api` entry: the AK as the key, the
 SK as metadata.
