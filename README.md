@@ -18,8 +18,8 @@ are asked for by the plugin's sign-in.
 The sign-in asks for the AK first — it is the one key OpenCode's `api`
 entry takes — and then for the SK, which becomes that entry's metadata.
 The keys are kept where OpenCode keeps sign-ins (`auth.json`; in
-magpie, `plugin-auth.json`) as an `api` entry: the AK as the key, the
-SK as metadata.
+magpie, `plugin-auth.json`) as an `api` entry: the SK as the key, the
+AK as metadata.
 
 ## The two model channels
 
@@ -67,8 +67,9 @@ and the plugin's `fetch` handles each request:
 ## Usage
 
 The account's free allowance (opengw's balance): the tokens left of
-the day's, as a window. The subscription's own allowance has no
-number Huawei tells.
+the day's, as a window. The subscription's credits (the snap-manager
+statistics the IDE's own quota bar reads) come as more windows when
+the account has a subscription.
 
 ```sh
 # magpie

@@ -20,11 +20,11 @@ globalThis.fetch = offline
 afterEach(() => (globalThis.fetch = offline))
 
 const AK = "AK", SK = "SK"
-const auth = { type: "api", key: AK, metadata: { sk: SK } }
+const auth = { type: "api", key: SK, metadata: { ak: AK } }
 
 // loader is the plugin's loader with a fixed auth and no models read
 async function loader() {
-  const hooks = await plugin({ client: { auth: { set: async () => {} } } })
+  const hooks = await plugin()
   return hooks.auth.loader(async () => auth)
 }
 
@@ -161,10 +161,11 @@ test("a body that isn't JSON is a 400", async () => {
   expect(res.status).toBe(400)
 })
 
-// the sign-in's shape: the AK as the key, the SK as metadata
+// the sign-in's shape: the SK as the key, the AK as metadata
 test("the keys an api sign-in holds", () => {
   expect(_internal.credsOf(auth)).toEqual({ ak: AK, sk: SK })
-  expect(_internal.credsOf({ type: "api", key: AK })).toBeNull() // no SK
+  expect(_internal.credsOf({ type: "api", key: SK })).toBeNull() // no AK
+  expect(_internal.credsOf({ type: "api", metadata: { ak: AK } })).toBeNull() // no SK
   expect(_internal.credsOf(null)).toBeNull()
 })
 
@@ -221,7 +222,6 @@ test("the subscription's credits", () => {
     metrics: [
       { name: "usageTotalPackageCredit", package_credit_amount: 100, package_credit_used: 30, package_credit_remain: 70 },
       { name: "usageBasicPackageCredit", package_credit_amount: 0, package_credit_used: 0, package_credit_remain: 0 },
-      { name: "usageTokenChatMessages", usage_token_num: 50, package_token_amount: 200 },
     ],
   }
   const u = _internal.usageOf({ free: { total_quota: 1000, total_balance: 250 }, sub: stats })
@@ -229,7 +229,6 @@ test("the subscription's credits", () => {
   expect(u.windows).toEqual([
     { name: "Free tokens", used: 75, display: "250 / 1000" },
     { name: "Total credits", used: 30, display: "70 / 100" },
-    { name: "Chat messages", used: 25, display: "50 / 200" },
   ])
   // a bare subscription answer, no free half: credits stand alone
   const v = _internal.usageOf({ sub: stats })
