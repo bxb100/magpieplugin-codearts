@@ -22,7 +22,7 @@
 import { createHash, createHmac } from "node:crypto"
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 
 const ID = "codearts"
 const MESSAGES = "@ai-sdk/openai-compatible"
@@ -48,10 +48,6 @@ const TIMEOUT = 30_000
 // a chat may take a while: the reference gave it 600s
 const CHAT_TIMEOUT = 600_000
 
-const STATUS_TEXT = { 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 408: "Request Timeout",
-  409: "Conflict", 413: "Request Entity Too Large", 429: "Too Many Requests", 500: "Internal Server Error", 502: "Bad Gateway",
-  503: "Service Unavailable", 504: "Gateway Timeout" }
-
 // ---- Huawei Cloud's SDK-HMAC-SHA256 signing --------------------------------------
 //
 // What Huawei Cloud signs (their Signature algorithm, as the IDE and the
@@ -74,19 +70,18 @@ const sha256 = (s) => createHash("sha256").update(s).digest("hex")
 // of them are signed, as they must be.
 function signedHeaders(method, url, ak, sk, body = "", extra = {}, now = Date.now()) {
   const u = new URL(url)
-  const path = u.pathname || "/"
+  const path = u.pathname
   const uri = path.endsWith("/") ? path : path + "/"
   const q = [...u.searchParams.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0))
   const quote = (v) => encodeURIComponent(String(v)).replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase())
   const query = q.map(([k, v]) => `${quote(k)}=${quote(v)}`).join("&")
-  const date = utc(now ?? Date.now())
+  const date = utc(now)
   const headers = { host: u.host, "content-type": "application/json", "x-sdk-date": date }
   for (const [k, v] of Object.entries(extra)) headers[k.toLowerCase()] = String(v)
   const names = Object.keys(headers).sort()
   const canonicalHeaders = names.map((n) => `${n}:${String(headers[n]).trim()}\n`).join("")
   const signed = names.join(";")
-  const payloadHash = createHash("sha256").update(body).digest("hex")
-  const canonicalRequest = [method.toUpperCase(), uri, query, canonicalHeaders, signed, payloadHash].join("\n")
+  const canonicalRequest = [method.toUpperCase(), uri, query, canonicalHeaders, signed, sha256(body)].join("\n")
   const stringToSign = ["SDK-HMAC-SHA256", date, sha256(canonicalRequest)].join("\n")
   const signature = createHmac("sha256", sk).update(stringToSign).digest("hex")
   return {
@@ -97,11 +92,9 @@ function signedHeaders(method, url, ak, sk, body = "", extra = {}, now = Date.no
 
 // send is a request to Huawei Cloud, signed, as the IDE sends one.
 async function send(ak, sk, method, url, body = "", extra = {}, signal) {
-  const headers = signedHeaders(method, url, ak, sk, body, extra)
-  if (method !== "GET") headers["Content-Length"] = String(Buffer.byteLength(body))
   return fetch(url, {
     method,
-    headers,
+    headers: signedHeaders(method, url, ak, sk, body, extra),
     body: method === "GET" ? undefined : body,
     signal: signal ?? AbortSignal.timeout(TIMEOUT),
   })
@@ -119,6 +112,9 @@ const model = (id, o = {}) => ({
   images: !!o.images,
 })
 
+// fallbackModels is the IDE's own list, the agent channel's first.
+const fallbackModels = () => [...AGENT_FALLBACK, ...BENEFIT_FALLBACK].map((id) => model(id))
+
 let listed = null // { at, list } of the last good read
 let reading = null // a read under way, so two callers share one
 
@@ -132,7 +128,7 @@ function cacheRead() {
 
 function cacheWrite(list) {
   try {
-    mkdirSync(join(CACHE, ".."), { recursive: true })
+    mkdirSync(dirname(CACHE), { recursive: true })
     const tmp = CACHE + ".tmp"
     writeFileSync(tmp, JSON.stringify({ at: Date.now(), list }, null, 2))
     renameSync(tmp, CACHE)
@@ -145,14 +141,16 @@ function cacheWrite(list) {
 async function agentModels(ak, sk, signal) {
   const res = await send(ak, sk, "GET", AGENTS, "", { "agent-type": "AgentCenter", "x-language": "zh-cn", accept: "application/json" }, signal)
   const text = await res.text()
-  if (!res.ok) throw new Error(`CodeArts agent list: ${res.status} ${STATUS_TEXT[res.status] ?? ""} ${text.slice(0, 200)}`.trim())
+  if (!res.ok) throw new Error(`CodeArts agent list: ${res.status} ${res.statusText} ${text.slice(0, 200)}`.trim())
   let agents = []
   try {
     agents = JSON.parse(text)?.agents ?? []
   } catch {}
   if (!agents.length) throw new Error("CodeArts listed no agents")
-  const order = (a) => [(a.is_primary_agent ? 0 : 1), a.agent_order == null ? 1 : 0, a.agent_order ?? 0]
-  const sorted = [...agents].sort((x, y) => order(x)[0] - order(y)[0] || order(x)[1] - order(y)[1] || order(x)[2] - order(y)[2])
+  // the primary agent first, then the agents' own order
+  const sorted = [...agents].sort((x, y) =>
+    Number(!!y.is_primary_agent) - Number(!!x.is_primary_agent) ||
+    (x.agent_order ?? Number.MAX_SAFE_INTEGER) - (y.agent_order ?? Number.MAX_SAFE_INTEGER))
   const out = []
   for (const a of sorted) {
     if (!a.agent_id) continue
@@ -203,7 +201,7 @@ async function modelsOf(ak, sk, signal) {
       try {
         benefit = await benefitModels(ak, sk, signal)
       } catch {}
-      if (!benefit.length) benefit = BENEFIT_FALLBACK.map((id) => model(id, { channel: "benefit" }))
+      if (!benefit.length) benefit = BENEFIT_FALLBACK.map((id) => model(id))
       const have = new Set(agents.map((m) => m.id))
       const list = [...agents, ...benefit.filter((m) => !have.has(m.id))]
       if (!list.length) throw new Error("CodeArts listed no models")
@@ -220,14 +218,10 @@ async function modelsOf(ak, sk, signal) {
 // known is the models to show: the account's if they can be read, else
 // the cache's, else the IDE's own list.
 async function known(ak, sk, signal) {
-  if (ak && sk) {
-    try {
-      return await modelsOf(ak, sk, signal)
-    } catch {}
-  }
-  const c = cacheRead()
-  if (c) return c.list
-  return [...AGENT_FALLBACK, ...BENEFIT_FALLBACK].map((id) => model(id, { channel: AGENT_FALLBACK.includes(id) ? "agent" : "benefit" }))
+  try {
+    return await modelsOf(ak, sk, signal)
+  } catch {}
+  return cacheRead()?.list ?? fallbackModels()
 }
 
 // configModel is a model in OpenCode's provider config; runtimeModel
@@ -235,7 +229,7 @@ async function known(ak, sk, signal) {
 function configModel(m) {
   return {
     name: m.name,
-    limit: { context: m.context ?? 0, output: m.output ?? 0 },
+    limit: { context: m.context, output: m.output },
     ...(m.images ? { attachment: true, modalities: { input: ["text", "image"], output: ["text"] } } : {}),
     tool_call: true,
   }
@@ -245,13 +239,13 @@ function runtimeModel(m) {
   return {
     id: m.id,
     providerID: ID,
-    name: m.name ?? m.id,
+    name: m.name,
     api: { id: m.id, url: BASE, npm: MESSAGES },
     status: "active",
     headers: {},
     options: {},
     cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
-    limit: { context: m.context ?? 0, output: m.output ?? 0 },
+    limit: { context: m.context, output: m.output },
     capabilities: {
       temperature: true,
       reasoning: true,
@@ -268,17 +262,6 @@ function runtimeModel(m) {
 
 // ---- the request: a chat completion, signed ----------------------------------------
 
-// failureOf is the status and message for what Huawei Cloud answered.
-function failureOf(status, text) {
-  let msg = String(text ?? "").trim()
-  try {
-    const e = JSON.parse(text)
-    msg = e.error_msg || e.error?.message || e.message || e.error_code || msg
-  } catch {}
-  msg ||= STATUS_TEXT[status] ?? ""
-  return { status, message: msg }
-}
-
 const errorResponse = (status, message) =>
   new Response(JSON.stringify({ error: { message, type: "api_error", code: null } }), {
     status,
@@ -291,9 +274,27 @@ const QUOTA_WORDS = /quota|insufficient|balance|credit|billing|exceeded|rate.?li
 
 // channelOf is a model's channel: agent (the subscription's own, the
 // base signature) or benefit (the free allowance, three more headers).
-const channelOf = (m, list) => {
-  const found = [...(list ?? []), ...AGENT_FALLBACK.map((id) => model(id))].find((x) => x.id === m)
-  return found?.channel === "agent" ? "agent" : "benefit"
+// A model the list doesn't know: the IDE's own agent models are agent,
+// everything else benefit.
+function channelOf(m, list) {
+  const found = (list ?? []).find((x) => x.id === m)
+  if (found) return found.channel === "agent" ? "agent" : "benefit"
+  return AGENT_FALLBACK.includes(m) ? "agent" : "benefit"
+}
+
+// parseAnswer reads a whole answer: JSON as it is (which may still be
+// an error), else SSE read as that — Huawei names SSE on a plain
+// answer, and JSON on a streamed one, so the body decides.
+function parseAnswer(text) {
+  try {
+    const j = JSON.parse(text)
+    if (j?.error_code || j?.error_msg) return { error: `${j.error_msg || "CodeArts error"} (${j.error_code})` }
+    if (j?.error?.message) return { error: j.error.message }
+    for (const c of j?.choices ?? []) if (c.finish_reason === "other") c.finish_reason = "stop"
+    return { body: j }
+  } catch {
+    return aggregate(text)
+  }
 }
 
 // complete answers one Chat Completions request through CodeArts.
@@ -310,48 +311,31 @@ async function complete(ak, sk, list, req, signal) {
     return errorResponse(502, `CodeArts: ${e.message ?? e}`)
   }
   if (!res.ok) {
-    const f = failureOf(res.status, (await res.text()).slice(0, 2000))
-    return errorResponse(QUOTA_WORDS.test(f.message) ? 429 : f.status, f.message)
+    const text = (await res.text()).slice(0, 2000)
+    let msg = text.trim() || `${res.status} ${res.statusText}`.trim()
+    try {
+      const e = JSON.parse(text)
+      msg = e.error_msg || e.error?.message || e.message || e.error_code || msg
+    } catch {}
+    return errorResponse(QUOTA_WORDS.test(msg) ? 429 : res.status, msg)
   }
-  const type = res.headers.get("content-type") ?? ""
   if (req.stream !== true) {
-    // the reference read the body as JSON first and only fell back to
-    // reading it as SSE, whatever the content-type said (Huawei names
-    // SSE on a plain answer, and JSON on a streamed one)
-    let out
-    const text = await res.text()
-    if (!type.includes("text/event-stream")) {
-      try {
-        const j = JSON.parse(text)
-        if (j?.error_code || j?.error_msg) out = { error: `${j.error_msg || "CodeArts error"} (${j.error_code})` }
-        else if (j?.error?.message) out = { error: j.error.message }
-        else if (j?.choices) {
-          for (const c of j.choices) if (c.finish_reason === "other") c.finish_reason = "stop"
-          out = { body: j }
-        } else out = await aggregate(text)
-      } catch {
-        out = await aggregate(text)
-      }
-    } else out = await aggregate(text)
+    const out = parseAnswer(await res.text())
     if (out.error) return errorResponse(QUOTA_WORDS.test(out.error) ? 429 : 502, out.error)
     if (!out.body) return errorResponse(502, "CodeArts answered nothing")
     return Response.json(out.body)
   }
   // streamed: an SSE answer goes through, its chunks fixed as OpenAI's
-  // shape has them; a JSON answer is wrapped as one chunk — Huawei names
-  // SSE on a JSON answer too, so what the body starts with decides
+  // shape has them; a JSON answer is wrapped as one chunk — Huawei
+  // names SSE on a JSON answer too, so what the body starts with decides
   const headers = { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" }
-  let sseAnswer = type.includes("text/event-stream")
-  if (sseAnswer) {
-    const peek = await res.clone().text().catch(() => "")
-    if (peek && !peek.trimStart().startsWith("data:")) sseAnswer = false
-  }
-  if (!sseAnswer) {
-    const out = await readJSON(res)
+  const peek = await res.clone().text().catch(() => "")
+  if (!peek.trimStart().startsWith("data:")) {
+    const out = parseAnswer(peek)
     if (out.error) return errorResponse(QUOTA_WORDS.test(out.error) ? 429 : 502, out.error)
     if (!out.body) return errorResponse(502, "CodeArts answered nothing")
     const chunk = { ...out.body, object: "chat.completion.chunk" }
-    chunk.choices = out.body.choices.map((c) => ({ ...c, delta: c.message }))
+    chunk.choices = (out.body.choices ?? []).map((c) => ({ ...c, delta: c.message }))
     const enc = new TextEncoder()
     const sse = new ReadableStream({
       start(ctl) {
@@ -368,26 +352,11 @@ async function complete(ak, sk, list, req, signal) {
   return new Response(sweeper, { status: 200, headers })
 }
 
-// readJSON reads a whole answer: JSON as it is (which may still be an
-// error), else SSE read as that — Huawei names SSE on a plain answer,
-// and JSON on a streamed one.
-async function readJSON(res) {
-  const text = await res.text()
-  try {
-    const j = JSON.parse(text)
-    if (j?.error_code || j?.error_msg) return { error: `${j.error_msg || "CodeArts error"} (${j.error_code})` }
-    if (j?.error?.message) return { error: j.error.message }
-    for (const c of j?.choices ?? []) if (c.finish_reason === "other") c.finish_reason = "stop"
-    return { body: j }
-  } catch {
-    return await aggregate(text)
-  }
-}
-
 // passThrough is an agent stream: byte for byte as it came, only the
 // [DONE] Huawei may have left off added at the end.
 function passThrough(body) {
   const reader = body.getReader()
+  const dec = new TextDecoder()
   let ended = false
   return new ReadableStream({
     async pull(ctl) {
@@ -396,8 +365,7 @@ function passThrough(body) {
         if (!ended) ctl.enqueue(new TextEncoder().encode("data: [DONE]\n\n"))
         return ctl.close()
       }
-      const text = new TextDecoder().decode(value, { stream: true })
-      if (text.includes("[DONE]")) ended = true
+      if (dec.decode(value, { stream: true }).includes("[DONE]")) ended = true
       ctl.enqueue(value)
     },
     cancel() {
@@ -479,7 +447,7 @@ function sweep(body) {
 
 // aggregate reads a whole SSE answer into one chat.completion, the
 // message, the tool calls and the usage put together.
-async function aggregate(text) {
+function aggregate(text) {
   const out = { id: null, object: "chat.completion", created: null, model: null,
     choices: [{ index: 0, message: { role: "assistant", content: "" }, finish_reason: "stop" }] }
   const texts = []
@@ -487,7 +455,7 @@ async function aggregate(text) {
   const calls = new Map()
   let finish = ""
   let usage
-  for (const line of String(text ?? "").split("\n")) {
+  for (const line of text.split("\n")) {
     const l = line.trim()
     if (!l.startsWith("data:")) continue
     const payload = l.slice(5).trim()
@@ -596,12 +564,6 @@ function usageOf(b) {
       const c = credit(metric(name))
       if (c) windows.push({ name: label, ...c })
     }
-    // const tokens = metric("usageTokenChatMessages")
-    // if (tokens && num(tokens.package_token_amount) > 0) {
-    //   const used = num(tokens.usage_token_num)
-    //   const amount = num(tokens.package_token_amount)
-    //   windows.push({ name: "Chat messages", used: pct((100 * used) / amount), display: `${used} / ${amount}` })
-    // }
   }
 
   if (!windows.length) return {}
@@ -611,8 +573,6 @@ function usageOf(b) {
 
 // ---- the plugin ---------------------------------------------------------------------
 
-const gone = (msg) => Object.assign(new Error(msg), { gone: true })
-
 // credsOf is the Huawei Cloud keys an auth entry holds: the Access Key
 // as the key, the Secret Key as metadata (OpenCode asks for one key,
 // so the sign-in's prompts put it there).
@@ -620,19 +580,18 @@ function credsOf(auth) {
   if (auth?.type !== "api") return null
   const ak = String(auth.metadata?.ak ?? "").trim()
   const sk = String(auth.key ?? "").trim()
-
   if (!ak || !sk) return null
   return { ak, sk }
 }
 
-export async function CodeartsAuthPlugin({ client } = {}) {
+export async function CodeartsAuthPlugin() {
   // the models of the account in use, so the channel each request goes
   // by is the latest list's, without a read per request
   let models = null
 
   const creds = async (getAuth) => {
     const c = credsOf(await getAuth())
-    if (!c) throw gone("this CodeArts account's keys are gone; add them again")
+    if (!c) throw new Error("this CodeArts account's keys are gone; add them again")
     return c
   }
 
@@ -650,8 +609,9 @@ export async function CodeartsAuthPlugin({ client } = {}) {
           apiKey: "", // the engine's placeholder; the fetch signs each request itself
           async fetch(input, init = {}) {
             const url = typeof input === "string" ? input : input instanceof URL ? input.href : input?.url ?? ""
-            if (!/\/chat\/completions$/.test(new URL(url).pathname))
-              return errorResponse(404, `this plugin only answers OpenAI Chat Completions requests, not ${new URL(url).pathname}`)
+            const { pathname } = new URL(url)
+            if (!pathname.endsWith("/chat/completions"))
+              return errorResponse(404, `this plugin only answers OpenAI Chat Completions requests, not ${pathname}`)
             let req
             const b = init.body ?? (input instanceof Request ? await input.clone().text() : undefined)
             try {
@@ -675,8 +635,8 @@ export async function CodeartsAuthPlugin({ client } = {}) {
           },
         }
       },
-      // the free allowance's balance, as magpie's own hook; the
-      // subscription's own has no number Huawei tells
+      // the free allowance's balance and the subscription's credits,
+      // as magpie's own hook
       async usage(getAuth) {
         let c
         try {
@@ -746,10 +706,9 @@ export async function CodeartsAuthPlugin({ client } = {}) {
 // staticModels is the models before any sign-in: the cache's, else the
 // IDE's own list, so the provider is never empty.
 function staticModels() {
-  const c = cacheRead()
-  const models = c ? c.list : [...AGENT_FALLBACK, ...BENEFIT_FALLBACK].map((id) => model(id, { channel: AGENT_FALLBACK.includes(id) ? "agent" : "benefit" }))
+  const models = cacheRead()?.list ?? fallbackModels()
   return Object.fromEntries(models.map((m) => [m.id, configModel(m)]))
 }
 
 // for tests
-export const _internal = { signedHeaders, utc, model, channelOf, aggregate, sweep, failureOf, usageOf, known, modelsOf, credsOf }
+export const _internal = { signedHeaders, utc, channelOf, usageOf, credsOf }
