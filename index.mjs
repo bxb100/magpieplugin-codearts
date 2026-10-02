@@ -34,6 +34,8 @@ const AGENT_DETAIL = BASE + "/v1/agent-center/agents/detail"
 const OPENGW = "https://opengw.developer.huaweicloud.com"
 const OPENGW_CONFIG = OPENGW + "/api/v1/gateway/config"
 const OPENGW_BALANCE = OPENGW + "/api/v1/user/tokens/balance"
+// the subscription's own account: the snap-manager statistics the IDE reads
+const STATS = BASE + "/snap-manager/v1/statistics/plugin"
 
 // the models when the cloud hasn't been asked: the IDE's own list (the
 // agent channel's are the subscription's, the benefit channel's the
@@ -527,29 +529,84 @@ async function aggregate(text) {
 
 // ---- the account's free allowance ---------------------------------------------------
 
-// balance is the free allowance's account: how much of it is left (the
-// opengw gateway's balance, the daily allowance the free models draw).
+// balance is the account as the two APIs that tell it read it: the free
+// allowance (the opengw gateway's balance, the daily allowance the free
+// models draw) and the subscription's credits (the snap-manager statistics
+// the IDE's own quota bar reads — it takes the same signature, so the
+// account's keys answer it without a sign-in of its own).
+// Either half may fail (the gateway down, no subscription yet): one good
+// answer keeps its half, and only both failing is an error.
 async function balance(ak, sk, signal) {
-  const res = await send(ak, sk, "GET", OPENGW_BALANCE, "", {}, signal)
-  const text = await res.text()
-  if (!res.ok) throw new Error(`CodeArts balance: ${res.status} ${text.slice(0, 200)}`.trim())
-  let b
-  try {
-    b = JSON.parse(text)?.result
-  } catch {}
-  if (!b) throw new Error("CodeArts balance: no answer")
-  return b
+  const read = async (url, what) => {
+    const res = await send(ak, sk, "GET", url, "", {}, signal)
+    const text = await res.text()
+    if (!res.ok) throw new Error(`CodeArts balance: ${res.status} ${text.slice(0, 200)}`.trim())
+    let j
+    try {
+      j = JSON.parse(text)
+    } catch {}
+    const b = j?.result ?? j
+    if (!b || typeof b !== "object") throw new Error(`CodeArts balance: no ${what} answer`)
+    return b
+  }
+  const [free, sub] = await Promise.allSettled([
+    read(OPENGW_BALANCE, "free"),
+    read(STATS, "subscription"),
+  ])
+  if (free.status !== "fulfilled" && sub.status !== "fulfilled")
+    throw free.reason ?? sub.reason
+  return {
+    free: free.status === "fulfilled" ? free.value : null,
+    sub: sub.status === "fulfilled" ? sub.value : null,
+  }
 }
 
-// usageOf is the allowance as a usage read shows it: the free tokens,
-// a window that fills as they are spent.
+// usageOf is the account as a usage read shows it: a window for the
+// free tokens, and one for the subscription's credits — as many as the
+// statistics named, each filling as it is spent. The plan is the
+// subscription's own name when it tells one.
 function usageOf(b) {
   const num = (x) => (typeof x === "number" && Number.isFinite(x) ? x : 0)
-  const total = num(b.total_quota)
-  const left = num(b.total_balance)
-  if (total <= 0) return {}
-  return { plan: "CodeArts Free", windows: [{ name: "Free tokens", used: Math.max(0, Math.min(100, 100 - (100 * left) / total)),
-    display: `${left} / ${total}` }] }
+  const pct = (used, total) => (total > 0 ? Math.max(0, Math.min(100, used)) : 0)
+  const windows = []
+
+  const free = b?.free ?? b // the old shape, a bare balance answer
+  const total = num(free?.total_quota)
+  const left = num(free?.total_balance)
+  if (total > 0)
+    windows.push({ name: "Free tokens", used: pct((100 * (total - left)) / total), display: `${left} / ${total}` })
+
+  const sub = b?.sub
+  if (sub) {
+    const metric = (name) => (Array.isArray(sub.metrics) ? sub.metrics.find((m) => m?.name === name) : null)
+    const credit = (m) => {
+      if (!m) return null
+      const amount = num(m.package_credit_amount)
+      const used = num(m.package_credit_used)
+      const remain = num(m.package_credit_remain)
+      if (amount <= 0 && used <= 0) return null
+      return { used: pct((100 * used) / (amount > 0 ? amount : used)), display: `${remain} / ${amount}` }
+    }
+    for (const [name, label] of [
+      ["usageTotalPackageCredit", "Total credits"],
+      ["usageBasicPackageCredit", "Basic credits"],
+      ["usageOnDemandPackageCredit", "On-demand credits"],
+      ["usageBonusPackageCredit", "Bonus credits"],
+    ]) {
+      const c = credit(metric(name))
+      if (c) windows.push({ name: label, ...c })
+    }
+    // const tokens = metric("usageTokenChatMessages")
+    // if (tokens && num(tokens.package_token_amount) > 0) {
+    //   const used = num(tokens.usage_token_num)
+    //   const amount = num(tokens.package_token_amount)
+    //   windows.push({ name: "Chat messages", used: pct((100 * used) / amount), display: `${used} / ${amount}` })
+    // }
+  }
+
+  if (!windows.length) return {}
+  const plan = sub?.package?.package_name_en || "CodeArts Free"
+  return { plan, windows }
 }
 
 // ---- the plugin ---------------------------------------------------------------------

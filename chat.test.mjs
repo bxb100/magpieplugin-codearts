@@ -206,10 +206,35 @@ test("the content-type may lie: SSE-labelled JSON is still read whole", async ()
   expect(chunks[1].slice(6)).toBe("[DONE]")
 })
 
-// usage: the free allowance as a window
+// usage: the free allowance as a window, the subscription's credits as more
 test("the free allowance's balance", () => {
   const u = _internal.usageOf({ total_quota: 1000, total_balance: 250 })
   expect(u.plan).toBe("CodeArts Free")
   expect(u.windows[0]).toEqual({ name: "Free tokens", used: 75, display: "250 / 1000" })
   expect(_internal.usageOf({})).toEqual({}) // no allowance: no windows
+})
+
+// usage: the subscription's credits, as the statistics name them
+test("the subscription's credits", () => {
+  const stats = {
+    package: { package_name_en: "Trial" },
+    metrics: [
+      { name: "usageTotalPackageCredit", package_credit_amount: 100, package_credit_used: 30, package_credit_remain: 70 },
+      { name: "usageBasicPackageCredit", package_credit_amount: 0, package_credit_used: 0, package_credit_remain: 0 },
+      { name: "usageTokenChatMessages", usage_token_num: 50, package_token_amount: 200 },
+    ],
+  }
+  const u = _internal.usageOf({ free: { total_quota: 1000, total_balance: 250 }, sub: stats })
+  expect(u.plan).toBe("Trial")
+  expect(u.windows).toEqual([
+    { name: "Free tokens", used: 75, display: "250 / 1000" },
+    { name: "Total credits", used: 30, display: "70 / 100" },
+    { name: "Chat messages", used: 25, display: "50 / 200" },
+  ])
+  // a bare subscription answer, no free half: credits stand alone
+  const v = _internal.usageOf({ sub: stats })
+  expect(v.plan).toBe("Trial")
+  expect(v.windows[0]).toEqual({ name: "Total credits", used: 30, display: "70 / 100" })
+  // zeroed metrics name no window
+  expect(_internal.usageOf({ sub: { metrics: [{ name: "usageTotalPackageCredit", package_credit_amount: 0, package_credit_used: 0 }] } })).toEqual({})
 })
