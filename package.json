@@ -1,5 +1,5 @@
 {
-  "name": "@magpie-community/opencode-codearts-auth",
+  "name": "magpie-codearts",
   "version": "0.1.0",
   "description": "Huawei Cloud CodeArts models (openpangu, GLM, DeepSeek, Qwen) in OpenCode and magpie",
   "type": "module",

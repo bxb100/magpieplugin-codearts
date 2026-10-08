@@ -1,4 +1,4 @@
-# @magpie-community/opencode-codearts-auth
+# magpie-codearts
 
 Makes [Huawei Cloud CodeArts](https://codearts.huaweicloud.com) models
 (openpangu, GLM, DeepSeek, Qwen VL …) usable in OpenCode and in magpie.
@@ -73,12 +73,12 @@ the account has a subscription.
 
 ```sh
 # magpie
-magpie plugin add @magpie-community/opencode-codearts-auth
+magpie plugin add magpie-codearts
 magpie plugin login codearts
 ```
 
 In OpenCode, `opencode.json`:
 
 ```json
-{ "plugin": ["@magpie-community/opencode-codearts-auth"] }
+{ "plugin": ["magpie-codearts"] }
 ```
